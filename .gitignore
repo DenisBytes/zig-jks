@@ -1,0 +1,68 @@
+# Claude AI context files
+CLAUDE.md
+.claude/
+
+# Zig build artifacts
+.zig-cache/
+zig-out/
+zig-cache/
+
+# Generated test data (can be regenerated with `zig build generate-testdata`)
+testdata/*.jks
+
+# Example outputs
+my_keystore.jks
+modified_keystore.jks
+password_test.jks
+*.jks
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-*
+.vim/
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+
+# Dependency directories (if using third-party packages)
+deps/
+vendor/
+
+# Coverage and profiling
+*.profdata
+*.profraw
+coverage/
+
+# Documentation build artifacts (if generating docs)
+docs/html/
+docs/site/
+
+# Lock files (build.zig.zon is committed, but some prefer to ignore locks)
+# build.zig.zon.lock
+
+# Personal notes and TODO files (optional)
+TODO.md
+NOTES.md
+scratch/
