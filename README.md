@@ -221,7 +221,6 @@ This project is released under the MIT License. See LICENSE file for details.
 ## References
 
 - [Java KeyStore Specification](https://docs.oracle.com/javase/7/docs/technotes/guides/security/crypto/CryptoSpec.html#KeyManagement)
-- [Original Go Implementation](https://github.com/pavlo-v-chernykh/keystore-go)
 
 ## Contributing
 
