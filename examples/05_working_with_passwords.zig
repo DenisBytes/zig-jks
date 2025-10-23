@@ -1,8 +1,7 @@
-/// Example: Working with passwords
-/// This example demonstrates password handling, security, and best practices
+// Password handling and security
 
 const std = @import("std");
-const jks = @import("zig_jks");
+const jks = @import("jks");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -14,7 +13,7 @@ pub fn main() !void {
     // Example 1: Using different passwords for store and keys
     std.debug.print("1. Store password vs Key passwords\n", .{});
 
-    var keystore = jks.KeyStore.init(allocator);
+    var keystore = jks.Jks.init(allocator);
     defer keystore.deinit();
 
     const cert_content = [_]u8{ 0x30, 0x82, 0x01 };
@@ -58,7 +57,7 @@ pub fn main() !void {
     // Example 2: Minimum password length enforcement
     std.debug.print("2. Enforcing minimum password length\n", .{});
 
-    var secure_keystore = jks.KeyStore.initWithOptions(allocator, .{
+    var secure_keystore = jks.Jks.initWithOptions(allocator, .{
         .min_password_len = 12,  // Require at least 12 characters
     });
     defer secure_keystore.deinit();
@@ -93,7 +92,7 @@ pub fn main() !void {
         .data = buffer.items,
     });
 
-    var test_keystore = jks.KeyStore.init(allocator);
+    var test_keystore = jks.Jks.init(allocator);
     defer test_keystore.deinit();
 
     const test_file = try std.fs.cwd().openFile("password_test.jks", .{});

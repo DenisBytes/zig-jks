@@ -1,9 +1,7 @@
-/// Example: Load, modify, and save a KeyStore
-/// This example shows the complete workflow of loading an existing keystore,
-/// making changes, and saving it back
+// Load an existing keystore, make changes, and save it back
 
 const std = @import("std");
-const jks = @import("zig_jks");
+const jks = @import("jks");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -22,7 +20,7 @@ pub fn main() !void {
     };
     defer input_file.close();
 
-    var keystore = jks.KeyStore.init(allocator);
+    var keystore = jks.Jks.init(allocator);
     defer keystore.deinit();
 
     const password = "password";
@@ -85,7 +83,7 @@ pub fn main() !void {
     // Step 4: Verify by reloading
     std.debug.print("4. Verifying by reloading\n", .{});
 
-    var verify_keystore = jks.KeyStore.init(allocator);
+    var verify_keystore = jks.Jks.init(allocator);
     defer verify_keystore.deinit();
 
     const verify_file = try std.fs.cwd().openFile("modified_keystore.jks", .{});

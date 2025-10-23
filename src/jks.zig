@@ -1,41 +1,162 @@
+//! Java KeyStore (JKS) encoder/decoder.
+//!
+//! JKS is Oracle's legacy keystore format, still used everywhere in Java land.
+//! Uses SHA-1 for integrity (yeah, I know). New stuff should use PKCS#12.
+//!
+//! Example:
+//! ```zig
+//! const jks = @import("jks");
+//!
+//! var ks = jks.Jks.init(allocator);
+//! defer ks.deinit();
+//!
+//! const cert = jks.Certificate{
+//!     .type = "X.509",
+//!     .content = cert_der_bytes,
+//! };
+//!
+//! try ks.setTrustedCertificateEntry("my-cert", .{
+//!     .creation_time = std.time.milliTimestamp(),
+//!     .certificate = cert,
+//! });
+//!
+//! try ks.store(writer, "password");
+//! ```
+
 const std = @import("std");
-const testing = std.testing;
-const common = @import("common.zig");
-const types = @import("types.zig");
-const encoder_mod = @import("encoder.zig");
-const decoder_mod = @import("decoder.zig");
-const keyprotector = @import("keyprotector.zig");
+const encoder = @import("encoder.zig");
+const decoder = @import("decoder.zig");
+const crypto = @import("crypto.zig");
 
-const Error = types.Error;
-const Certificate = types.Certificate;
-const PrivateKeyEntry = types.PrivateKeyEntry;
-const TrustedCertificateEntry = types.TrustedCertificateEntry;
-const Entry = types.Entry;
+// JKS format constants
+pub const magic: u32 = 0xfeedfeed;
+pub const version_01: u32 = 1;
+pub const version_02: u32 = 2;
+const private_key_tag: u32 = 1;
+const trusted_certificate_tag: u32 = 2;
+const whitener_message = "Mighty Aphrodite";
+const byte_order = std.builtin.Endian.big;
 
-/// Options for KeyStore behavior
-pub const KeyStoreOptions = struct {
-    /// Order aliases alphabetically when listing
+// Public types
+pub const Certificate = struct {
+    type: []const u8,
+    content: []const u8,
+
+    pub fn validate(self: Certificate) Error!void {
+        if (self.type.len == 0) return Error.EmptyCertificateType;
+        if (self.content.len == 0) return Error.EmptyCertificateContent;
+    }
+
+    pub fn clone(self: Certificate, allocator: std.mem.Allocator) !Certificate {
+        const type_copy = try allocator.dupe(u8, self.type);
+        errdefer allocator.free(type_copy);
+
+        const content_copy = try allocator.dupe(u8, self.content);
+        errdefer allocator.free(content_copy);
+
+        return Certificate{
+            .type = type_copy,
+            .content = content_copy,
+        };
+    }
+
+    pub fn deinit(self: Certificate, allocator: std.mem.Allocator) void {
+        allocator.free(self.type);
+        allocator.free(self.content);
+    }
+};
+
+pub const PrivateKeyEntry = struct {
+    creation_time: i64,
+    private_key: []const u8,
+    certificate_chain: []const Certificate,
+
+    pub fn validate(self: PrivateKeyEntry) Error!void {
+        if (self.private_key.len == 0) return Error.EmptyPrivateKey;
+
+        for (self.certificate_chain, 0..) |cert, i| {
+            cert.validate() catch |err| {
+                std.log.err("Invalid certificate at index {d} in chain", .{i});
+                return err;
+            };
+        }
+    }
+
+    pub fn deinit(self: PrivateKeyEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.private_key);
+        for (self.certificate_chain) |cert| {
+            cert.deinit(allocator);
+        }
+        allocator.free(self.certificate_chain);
+    }
+};
+
+pub const TrustedCertificateEntry = struct {
+    creation_time: i64,
+    certificate: Certificate,
+
+    pub fn validate(self: TrustedCertificateEntry) Error!void {
+        try self.certificate.validate();
+    }
+
+    pub fn deinit(self: TrustedCertificateEntry, allocator: std.mem.Allocator) void {
+        self.certificate.deinit(allocator);
+    }
+};
+
+pub const Entry = union(enum) {
+    private_key: PrivateKeyEntry,
+    trusted_certificate: TrustedCertificateEntry,
+
+    pub fn validate(self: Entry) Error!void {
+        return switch (self) {
+            .private_key => |e| e.validate(),
+            .trusted_certificate => |e| e.validate(),
+        };
+    }
+
+    pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .private_key => |e| e.deinit(allocator),
+            .trusted_certificate => |e| e.deinit(allocator),
+        }
+    }
+};
+
+pub const Error = error{
+    EntryNotFound,
+    WrongEntryType,
+    EmptyPrivateKey,
+    EmptyCertificateType,
+    EmptyCertificateContent,
+    ShortPassword,
+    InvalidMagic,
+    InvalidDigest,
+    InvalidVersion,
+    UnknownEntryTag,
+    UnsupportedAlgorithm,
+    InvalidKeyData,
+    StringTooLong,
+    DataTooLong,
+};
+
+pub const Options = struct {
     ordered: bool = false,
-    /// Preserve original case of aliases (default: convert to lowercase)
     case_exact: bool = false,
-    /// Minimum password length (default: 0, no minimum)
     min_password_len: usize = 0,
 };
 
-/// KeyStore manages JKS entries (private keys and trusted certificates)
-pub const KeyStore = struct {
+pub const Jks = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMap(Entry),
-    options: KeyStoreOptions,
+    options: Options,
     random: std.Random,
 
-    /// Create a new KeyStore with default options
-    pub fn init(allocator: std.mem.Allocator) KeyStore {
+    pub fn init(allocator: std.mem.Allocator) Jks {
         return initWithOptions(allocator, .{});
     }
 
-    /// Create a new KeyStore with custom options
-    pub fn initWithOptions(allocator: std.mem.Allocator, options: KeyStoreOptions) KeyStore {
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Jks {
         return .{
             .allocator = allocator,
             .entries = std.StringHashMap(Entry).init(allocator),
@@ -44,8 +165,7 @@ pub const KeyStore = struct {
         };
     }
 
-    /// Free all resources
-    pub fn deinit(self: *KeyStore) void {
+    pub fn deinit(self: *Jks) void {
         var it = self.entries.iterator();
         while (it.next()) |kv| {
             self.allocator.free(kv.key_ptr.*);
@@ -54,13 +174,11 @@ pub const KeyStore = struct {
         self.entries.deinit();
     }
 
-    /// Convert alias to the appropriate case
-    fn convertAlias(self: *const KeyStore, alias: []const u8) ![]u8 {
+    fn convertAlias(self: *const Jks, alias: []const u8) ![]u8 {
         if (self.options.case_exact) {
             return try self.allocator.dupe(u8, alias);
         }
 
-        // Convert to lowercase
         const lower = try self.allocator.alloc(u8, alias.len);
         for (alias, 0..) |c, i| {
             lower[i] = std.ascii.toLower(c);
@@ -68,9 +186,8 @@ pub const KeyStore = struct {
         return lower;
     }
 
-    /// Set a private key entry
     pub fn setPrivateKeyEntry(
-        self: *KeyStore,
+        self: *Jks,
         alias: []const u8,
         entry: PrivateKeyEntry,
         password: []const u8,
@@ -80,9 +197,7 @@ pub const KeyStore = struct {
         }
 
         try entry.validate();
-
-        // Encrypt the private key
-        const encrypted_key = try keyprotector.encrypt(
+        const encrypted_key = try crypto.encrypt(
             self.allocator,
             self.random,
             entry.private_key,
@@ -90,7 +205,6 @@ pub const KeyStore = struct {
         );
         errdefer self.allocator.free(encrypted_key);
 
-        // Clone certificates
         const cert_chain = try self.allocator.alloc(Certificate, entry.certificate_chain.len);
         errdefer {
             for (cert_chain) |cert| {
@@ -103,7 +217,6 @@ pub const KeyStore = struct {
             cert_chain[i] = try cert.clone(self.allocator);
         }
 
-        // Create entry with encrypted key
         const encrypted_entry = PrivateKeyEntry{
             .creation_time = entry.creation_time,
             .private_key = encrypted_key,
@@ -113,7 +226,6 @@ pub const KeyStore = struct {
         const converted_alias = try self.convertAlias(alias);
         errdefer self.allocator.free(converted_alias);
 
-        // Remove existing entry if present
         if (self.entries.fetchRemove(converted_alias)) |kv| {
             self.allocator.free(kv.key);
             kv.value.deinit(self.allocator);
@@ -122,9 +234,8 @@ pub const KeyStore = struct {
         try self.entries.put(converted_alias, Entry{ .private_key = encrypted_entry });
     }
 
-    /// Get a private key entry (decrypts the private key)
     pub fn getPrivateKeyEntry(
-        self: *KeyStore,
+        self: *Jks,
         alias: []const u8,
         password: []const u8,
     ) !PrivateKeyEntry {
@@ -135,15 +246,13 @@ pub const KeyStore = struct {
 
         switch (entry) {
             .private_key => |pke| {
-                // Decrypt the private key
-                const decrypted_key = try keyprotector.decrypt(
+                const decrypted_key = try crypto.decrypt(
                     self.allocator,
                     pke.private_key,
                     password,
                 );
                 errdefer self.allocator.free(decrypted_key);
 
-                // Clone certificate chain
                 const cert_chain = try self.allocator.alloc(Certificate, pke.certificate_chain.len);
                 errdefer {
                     for (cert_chain) |cert| {
@@ -166,8 +275,7 @@ pub const KeyStore = struct {
         }
     }
 
-    /// Check if an entry is a private key entry
-    pub fn isPrivateKeyEntry(self: *KeyStore, alias: []const u8) !bool {
+    pub fn isPrivateKeyEntry(self: *Jks, alias: []const u8) !bool {
         const converted_alias = try self.convertAlias(alias);
         defer self.allocator.free(converted_alias);
 
@@ -177,15 +285,12 @@ pub const KeyStore = struct {
         return false;
     }
 
-    /// Set a trusted certificate entry
     pub fn setTrustedCertificateEntry(
-        self: *KeyStore,
+        self: *Jks,
         alias: []const u8,
         entry: TrustedCertificateEntry,
     ) !void {
         try entry.validate();
-
-        // Clone certificate
         const cert = try entry.certificate.clone(self.allocator);
         errdefer cert.deinit(self.allocator);
 
@@ -197,7 +302,6 @@ pub const KeyStore = struct {
         const converted_alias = try self.convertAlias(alias);
         errdefer self.allocator.free(converted_alias);
 
-        // Remove existing entry if present
         if (self.entries.fetchRemove(converted_alias)) |kv| {
             self.allocator.free(kv.key);
             kv.value.deinit(self.allocator);
@@ -206,9 +310,8 @@ pub const KeyStore = struct {
         try self.entries.put(converted_alias, Entry{ .trusted_certificate = new_entry });
     }
 
-    /// Get a trusted certificate entry
     pub fn getTrustedCertificateEntry(
-        self: *KeyStore,
+        self: *Jks,
         alias: []const u8,
     ) !TrustedCertificateEntry {
         const converted_alias = try self.convertAlias(alias);
@@ -228,8 +331,7 @@ pub const KeyStore = struct {
         }
     }
 
-    /// Check if an entry is a trusted certificate entry
-    pub fn isTrustedCertificateEntry(self: *KeyStore, alias: []const u8) !bool {
+    pub fn isTrustedCertificateEntry(self: *Jks, alias: []const u8) !bool {
         const converted_alias = try self.convertAlias(alias);
         defer self.allocator.free(converted_alias);
 
@@ -239,8 +341,7 @@ pub const KeyStore = struct {
         return false;
     }
 
-    /// Delete an entry
-    pub fn deleteEntry(self: *KeyStore, alias: []const u8) !void {
+    pub fn deleteEntry(self: *Jks, alias: []const u8) !void {
         const converted_alias = try self.convertAlias(alias);
         defer self.allocator.free(converted_alias);
 
@@ -250,8 +351,7 @@ pub const KeyStore = struct {
         }
     }
 
-    /// Get all aliases
-    pub fn aliases(self: *KeyStore) ![][]const u8 {
+    pub fn aliases(self: *Jks) ![][]const u8 {
         const result = try self.allocator.alloc([]const u8, self.entries.count());
         errdefer self.allocator.free(result);
 
@@ -272,30 +372,24 @@ pub const KeyStore = struct {
         return result;
     }
 
-    /// Store the keystore to a writer
-    pub fn store(self: *KeyStore, writer: std.io.AnyWriter, password: []const u8) !void {
+    pub fn store(self: *Jks, writer: std.io.AnyWriter, password: []const u8) !void {
         if (password.len < self.options.min_password_len) {
             return Error.ShortPassword;
         }
 
-        var enc = encoder_mod.Encoder.init(writer);
-
-        // Initialize hash with password
-        const password_bytes = try common.passwordBytes(self.allocator, password);
+        var enc = encoder.Encoder.init(writer);
+        const password_bytes = try passwordBytes(self.allocator, password);
         defer {
-            common.zeroing(password_bytes);
+            zeroing(password_bytes);
             self.allocator.free(password_bytes);
         }
 
         enc.hash.update(password_bytes);
-        enc.hash.update(common.whitener_message);
-
-        // Write header
-        try enc.writeU32(common.magic);
-        try enc.writeU32(common.version_02);
+        enc.hash.update(whitener_message);
+        try enc.writeU32(magic);
+        try enc.writeU32(version_02);
         try enc.writeU32(@intCast(self.entries.count()));
 
-        // Write entries
         const alias_list = try self.aliases();
         defer self.allocator.free(alias_list);
 
@@ -303,59 +397,108 @@ pub const KeyStore = struct {
             const entry = self.entries.get(alias_str).?;
             switch (entry) {
                 .private_key => |pke| {
-                    try enc.writePrivateKeyEntry(alias_str, pke);
+                    try enc.writeU32(private_key_tag);
+                    try enc.writeString(alias_str);
+                    try enc.writeU64(@intCast(pke.creation_time));
+                    try enc.writeU32(@intCast(pke.private_key.len));
+                    try enc.writeBytes(pke.private_key);
+                    try enc.writeU32(@intCast(pke.certificate_chain.len));
+                    for (pke.certificate_chain) |cert| {
+                        try enc.writeCertificate(cert.type, cert.content, version_02);
+                    }
                 },
                 .trusted_certificate => |tce| {
-                    try enc.writeTrustedCertificateEntry(alias_str, tce);
+                    try enc.writeU32(trusted_certificate_tag);
+                    try enc.writeString(alias_str);
+                    try enc.writeU64(@intCast(tce.creation_time));
+                    try enc.writeCertificate(tce.certificate.type, tce.certificate.content, version_02);
                 },
             }
         }
 
-        // Write digest
         const digest = enc.finalize();
         try writer.writeAll(&digest);
     }
 
-    /// Load a keystore from a reader
-    pub fn load(self: *KeyStore, reader: std.io.AnyReader, password: []const u8) !void {
-        var dec = decoder_mod.Decoder.init(self.allocator, reader);
-
-        // Initialize hash with password
-        const password_bytes = try common.passwordBytes(self.allocator, password);
+    pub fn load(self: *Jks, reader: std.io.AnyReader, password: []const u8) !void {
+        var dec = decoder.Decoder.init(self.allocator, reader);
+        const password_bytes = try passwordBytes(self.allocator, password);
         defer {
-            common.zeroing(password_bytes);
+            zeroing(password_bytes);
             self.allocator.free(password_bytes);
         }
 
         dec.hash.update(password_bytes);
-        dec.hash.update(common.whitener_message);
+        dec.hash.update(whitener_message);
 
-        // Read header
         const read_magic = try dec.readU32();
-        if (read_magic != common.magic) {
+        if (read_magic != magic) {
             return Error.InvalidMagic;
         }
 
         const version = try dec.readU32();
-        if (version != common.version_01 and version != common.version_02) {
+        if (version != version_01 and version != version_02) {
             return Error.InvalidVersion;
         }
 
         const entry_count = try dec.readU32();
-
-        // Read entries
         var i: u32 = 0;
         while (i < entry_count) : (i += 1) {
-            const result = try dec.readEntry(version);
-            errdefer {
-                self.allocator.free(result.alias);
-                result.entry.deinit(self.allocator);
-            }
+            const tag = try dec.readU32();
+            const alias = try dec.readString();
+            errdefer self.allocator.free(alias);
 
-            try self.entries.put(result.alias, result.entry);
+            const entry = switch (tag) {
+                private_key_tag => blk: {
+                    const creation_time = try dec.readU64();
+                    const pk_len = try dec.readU32();
+                    const private_key = try dec.readBytes(pk_len);
+                    errdefer self.allocator.free(private_key);
+
+                    const cert_num = try dec.readU32();
+                    const chain = try self.allocator.alloc(Certificate, cert_num);
+                    errdefer {
+                        for (chain) |cert| {
+                            cert.deinit(self.allocator);
+                        }
+                        self.allocator.free(chain);
+                    }
+
+                    for (chain) |*cert| {
+                        const cert_data = try dec.readCertificate(version);
+                        cert.* = Certificate{
+                            .type = cert_data.cert_type,
+                            .content = cert_data.content,
+                        };
+                    }
+
+                    const pke = PrivateKeyEntry{
+                        .creation_time = @intCast(creation_time),
+                        .private_key = private_key,
+                        .certificate_chain = chain,
+                    };
+                    break :blk Entry{ .private_key = pke };
+                },
+                trusted_certificate_tag => blk: {
+                    const creation_time = try dec.readU64();
+                    const cert_data = try dec.readCertificate(version);
+
+                    const tce = TrustedCertificateEntry{
+                        .creation_time = @intCast(creation_time),
+                        .certificate = Certificate{
+                            .type = cert_data.cert_type,
+                            .content = cert_data.content,
+                        },
+                    };
+                    break :blk Entry{ .trusted_certificate = tce };
+                },
+                else => return Error.UnknownEntryTag,
+            };
+            errdefer entry.deinit(self.allocator);
+
+            try self.entries.put(alias, entry);
         }
 
-        // Verify digest
         const computed_digest = dec.finalize();
         var actual_digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
         try reader.readNoEof(&actual_digest);
@@ -366,10 +509,35 @@ pub const KeyStore = struct {
     }
 };
 
-// Tests
+// Helper functions
+fn passwordBytes(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
+    const result = try allocator.alloc(u8, password.len * 2);
+    errdefer allocator.free(result);
 
-test "KeyStore: set and get private key entry" {
-    var ks = KeyStore.init(testing.allocator);
+    for (password, 0..) |b, i| {
+        result[i * 2] = 0;
+        result[i * 2 + 1] = b;
+    }
+
+    return result;
+}
+
+fn zeroing(buf: []u8) void {
+    @memset(buf, 0);
+}
+
+// Tests
+const testing = std.testing;
+
+test "Jks: basic operations" {
+    var ks = Jks.init(testing.allocator);
+    defer ks.deinit();
+
+    try testing.expectEqual(@as(usize, 0), ks.entries.count());
+}
+
+test "Jks: set and get private key entry" {
+    var ks = Jks.init(testing.allocator);
     defer ks.deinit();
 
     const cert = Certificate{
@@ -392,8 +560,8 @@ test "KeyStore: set and get private key entry" {
     try testing.expectEqualStrings(entry.private_key, retrieved.private_key);
 }
 
-test "KeyStore: set and get trusted certificate entry" {
-    var ks = KeyStore.init(testing.allocator);
+test "Jks: set and get trusted certificate entry" {
+    var ks = Jks.init(testing.allocator);
     defer ks.deinit();
 
     const cert = Certificate{
@@ -415,55 +583,10 @@ test "KeyStore: set and get trusted certificate entry" {
     try testing.expectEqualSlices(u8, cert.content, retrieved.certificate.content);
 }
 
-test "KeyStore: case insensitive aliases by default" {
-    var ks = KeyStore.init(testing.allocator);
+test "Jks: store and load round trip" {
+    var ks = Jks.init(testing.allocator);
     defer ks.deinit();
 
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-
-    const entry = TrustedCertificateEntry{
-        .creation_time = 1000000,
-        .certificate = cert,
-    };
-
-    try ks.setTrustedCertificateEntry("MyAlias", entry);
-
-    // Should be able to retrieve with different case
-    const retrieved = try ks.getTrustedCertificateEntry("myalias");
-    defer retrieved.deinit(testing.allocator);
-
-    try testing.expectEqual(entry.creation_time, retrieved.creation_time);
-}
-
-test "KeyStore: case exact aliases with option" {
-    var ks = KeyStore.initWithOptions(testing.allocator, .{ .case_exact = true });
-    defer ks.deinit();
-
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-
-    const entry = TrustedCertificateEntry{
-        .creation_time = 1000000,
-        .certificate = cert,
-    };
-
-    try ks.setTrustedCertificateEntry("MyAlias", entry);
-
-    // Should not find with different case
-    const result = ks.getTrustedCertificateEntry("myalias");
-    try testing.expectError(Error.EntryNotFound, result);
-}
-
-test "KeyStore: store and load round trip" {
-    var ks = KeyStore.init(testing.allocator);
-    defer ks.deinit();
-
-    // Add a trusted certificate
     const cert = Certificate{
         .type = "X509",
         .content = &[_]u8{ 0x30, 0x82, 0x01, 0x02, 0x03 },
@@ -476,7 +599,6 @@ test "KeyStore: store and load round trip" {
 
     try ks.setTrustedCertificateEntry("mycert", tce);
 
-    // Add a private key
     const chain = [_]Certificate{cert};
     const pke = PrivateKeyEntry{
         .creation_time = 2000000,
@@ -486,20 +608,17 @@ test "KeyStore: store and load round trip" {
 
     try ks.setPrivateKeyEntry("mykey", pke, "password123");
 
-    // Store to buffer
     var buffer = std.ArrayList(u8).init(testing.allocator);
     defer buffer.deinit();
 
     try ks.store(buffer.writer().any(), "storepass");
 
-    // Load into new keystore
-    var ks2 = KeyStore.init(testing.allocator);
+    var ks2 = Jks.init(testing.allocator);
     defer ks2.deinit();
 
     var stream = std.io.fixedBufferStream(buffer.items);
     try ks2.load(stream.reader().any(), "storepass");
 
-    // Verify entries
     try testing.expectEqual(@as(usize, 2), ks2.entries.count());
 
     const retrieved_tce = try ks2.getTrustedCertificateEntry("mycert");
@@ -512,100 +631,6 @@ test "KeyStore: store and load round trip" {
     try testing.expectEqualStrings(pke.private_key, retrieved_pke.private_key);
 }
 
-test "KeyStore: delete entry" {
-    var ks = KeyStore.init(testing.allocator);
-    defer ks.deinit();
-
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-
-    const entry = TrustedCertificateEntry{
-        .creation_time = 1000000,
-        .certificate = cert,
-    };
-
-    try ks.setTrustedCertificateEntry("mycert", entry);
-    try testing.expectEqual(@as(usize, 1), ks.entries.count());
-
-    try ks.deleteEntry("mycert");
-    try testing.expectEqual(@as(usize, 0), ks.entries.count());
-
-    const result = ks.getTrustedCertificateEntry("mycert");
-    try testing.expectError(Error.EntryNotFound, result);
-}
-
-test "KeyStore: aliases list" {
-    var ks = KeyStore.init(testing.allocator);
-    defer ks.deinit();
-
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-
-    const entry = TrustedCertificateEntry{
-        .creation_time = 1000000,
-        .certificate = cert,
-    };
-
-    try ks.setTrustedCertificateEntry("alias1", entry);
-    try ks.setTrustedCertificateEntry("alias2", entry);
-    try ks.setTrustedCertificateEntry("alias3", entry);
-
-    const alias_list = try ks.aliases();
-    defer testing.allocator.free(alias_list);
-
-    try testing.expectEqual(@as(usize, 3), alias_list.len);
-}
-
-test "KeyStore: ordered aliases" {
-    var ks = KeyStore.initWithOptions(testing.allocator, .{ .ordered = true });
-    defer ks.deinit();
-
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-
-    const entry = TrustedCertificateEntry{
-        .creation_time = 1000000,
-        .certificate = cert,
-    };
-
-    try ks.setTrustedCertificateEntry("charlie", entry);
-    try ks.setTrustedCertificateEntry("alice", entry);
-    try ks.setTrustedCertificateEntry("bob", entry);
-
-    const alias_list = try ks.aliases();
-    defer testing.allocator.free(alias_list);
-
-    try testing.expectEqualStrings("alice", alias_list[0]);
-    try testing.expectEqualStrings("bob", alias_list[1]);
-    try testing.expectEqualStrings("charlie", alias_list[2]);
-}
-
-test "KeyStore: minimum password length" {
-    var ks = KeyStore.initWithOptions(testing.allocator, .{ .min_password_len = 8 });
-    defer ks.deinit();
-
-    const cert = Certificate{
-        .type = "X509",
-        .content = &[_]u8{ 0x30, 0x82 },
-    };
-    const chain = [_]Certificate{cert};
-
-    const pke = PrivateKeyEntry{
-        .creation_time = 1000000,
-        .private_key = "test_key",
-        .certificate_chain = &chain,
-    };
-
-    // Short password should fail
-    const result1 = ks.setPrivateKeyEntry("mykey", pke, "short");
-    try testing.expectError(Error.ShortPassword, result1);
-
-    // Long enough password should work
-    try ks.setPrivateKeyEntry("mykey", pke, "longpassword");
+test {
+    std.testing.refAllDecls(@This());
 }

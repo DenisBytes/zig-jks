@@ -1,18 +1,17 @@
-/// Example: Managing KeyStore entries
-/// This example demonstrates adding, updating, and deleting entries
+// Add, update, and delete keystore entries
 
 const std = @import("std");
-const jks = @import("zig_jks");
+const jks = @import("jks");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("Managing KeyStore Entries...\n\n", .{});
+    std.debug.print("Managing JKS keystore Entries...\n\n", .{});
 
     // Create a keystore with ordered aliases
-    var keystore = jks.KeyStore.initWithOptions(allocator, .{
+    var keystore = jks.Jks.initWithOptions(allocator, .{
         .ordered = true,  // Keep aliases sorted
         .case_exact = false,  // Case-insensitive aliases
     });

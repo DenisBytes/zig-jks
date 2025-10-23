@@ -1,20 +1,20 @@
 # zig-jks
 
-A Zig implementation of the Java KeyStore (JKS) format encoder/decoder.
+Java KeyStore (JKS) encoder/decoder in pure Zig.
 
 ## Overview
 
-**zig-jks** is a pure Zig library for reading and writing Java KeyStore files in the JKS format. This library provides a complete implementation compatible with the Java KeyStore specification, allowing you to manage cryptographic keys and certificates from Zig applications.
+Read and write JKS files (the keystore format used by Java). Fully compatible with Java's keytool and the JKS spec.
 
 ## Features
 
-- **Full JKS Format Support**: Read and write JKS files (versions 1 and 2)
-- **Entry Types**: Manage both private key entries and trusted certificate entries
-- **Encryption**: Secure private key encryption using Sun's proprietary algorithm
-- **Options**: Configurable alias handling (case-sensitive, ordered) and password policies
-- **Memory Safe**: Explicit memory management with Zig's allocator pattern
-- **Zero Dependencies**: Pure Zig implementation using only the standard library
-- **Well Tested**: Comprehensive test suite with >95% coverage
+- Read/write JKS v1 and v2 files
+- Private key entries and trusted certificates
+- Sun's proprietary key encryption algorithm
+- Configurable alias handling (case-sensitive, ordered)
+- Password policies (minimum length, etc)
+- Zero dependencies - just Zig stdlib
+- Comprehensive test suite
 
 ## Requirements
 
@@ -26,7 +26,7 @@ Add this to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
-    .zig_jks = .{
+    .jks = .{
         .url = "https://github.com/yourusername/zig-jks/archive/main.tar.gz",
         .hash = "...",
     },
@@ -36,11 +36,11 @@ Add this to your `build.zig.zon`:
 And in your `build.zig`:
 
 ```zig
-const zig_jks = b.dependency("zig_jks", .{
+const jks = b.dependency("jks", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("zig_jks", zig_jks.module("zig_jks"));
+exe.root_module.addImport("jks", jks.module("jks"));
 ```
 
 ## Quick Start
@@ -57,12 +57,12 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Create a new keystore
-    var keystore = jks.KeyStore.init(allocator);
+    var keystore = jks.Jks.init(allocator);
     defer keystore.deinit();
 
     // Add a trusted certificate
     const cert = jks.Certificate{
-        .type = "X509",
+        .type = "X.509",
         .content = certificate_der_bytes,
     };
 
@@ -87,7 +87,7 @@ pub fn main() !void {
 const file = try std.fs.cwd().openFile("keystore.jks", .{});
 defer file.close();
 
-var keystore = jks.KeyStore.init(allocator);
+var keystore = jks.Jks.init(allocator);
 defer keystore.deinit();
 
 try keystore.load(file.reader().any(), "storepassword");
@@ -123,19 +123,17 @@ std.debug.print("Private key size: {d} bytes\n", .{retrieved.private_key.len});
 ## Configuration Options
 
 ```zig
-const options = jks.KeyStoreOptions{
+var keystore = jks.Jks.initWithOptions(allocator, .{
     .ordered = true,           // Sort aliases alphabetically
-    .case_exact = true,        // Preserve alias case (default: lowercase)
+    .case_exact = false,       // Case-insensitive aliases (default)
     .min_password_len = 8,     // Minimum password length
-};
-
-var keystore = jks.KeyStore.initWithOptions(allocator, options);
+});
 defer keystore.deinit();
 ```
 
 ## API Reference
 
-### KeyStore
+### Jks
 
 - `init(allocator)` - Create a new keystore with default options
 - `initWithOptions(allocator, options)` - Create with custom options
@@ -144,6 +142,8 @@ defer keystore.deinit();
 - `getPrivateKeyEntry(alias, password)` - Retrieve and decrypt a private key entry
 - `setTrustedCertificateEntry(alias, entry)` - Add a trusted certificate
 - `getTrustedCertificateEntry(alias)` - Retrieve a trusted certificate
+- `isPrivateKeyEntry(alias)` - Check if entry is a private key
+- `isTrustedCertificateEntry(alias)` - Check if entry is a trusted certificate
 - `deleteEntry(alias)` - Remove an entry
 - `aliases()` - Get list of all aliases
 - `store(writer, password)` - Write keystore to a writer
@@ -155,12 +155,12 @@ defer keystore.deinit();
 - `PrivateKeyEntry` - Private key with certificate chain
 - `TrustedCertificateEntry` - Standalone trusted certificate
 
-## Important Notes
+## Notes
 
-- **Private Keys**: Must be in PKCS#8 format
-- **Passwords**: Zeroed after use for security
-- **SHA-1**: Used for compatibility with JKS format (legacy standard)
-- **Memory**: All returned data must be freed by the caller using `deinit()`
+- Private keys must be PKCS#8 encoded
+- Passwords are zeroed after use
+- Uses SHA-1 (JKS requirement, yeah it's legacy)
+- Caller owns all returned data - remember to `deinit()`
 
 ## Examples
 
@@ -172,7 +172,14 @@ The `examples/` directory contains practical demonstrations:
 - **04_load_modify_save.zig** - Complete workflow example
 - **05_working_with_passwords.zig** - Password handling and security
 
-See [examples/README.md](examples/README.md) for detailed instructions.
+Run examples with:
+```bash
+zig build create     # Create a keystore
+zig build inspect    # Inspect keystore contents
+zig build manage     # Manage entries
+zig build workflow   # Load/modify/save workflow
+zig build passwords  # Password handling
+```
 
 ## Test Data
 
@@ -192,8 +199,6 @@ This creates keystores with:
 - Large keystores (50+ entries)
 - Various password configurations
 
-See [testdata/README.md](testdata/README.md) for details on each test file.
-
 ## Testing
 
 Run the test suite:
@@ -204,10 +209,10 @@ zig build test
 
 ## Compatibility
 
-This implementation is compatible with Java KeyStore files created by:
-- Java's `keytool` utility
-- The `java.security.KeyStore` API
-- Other JKS-compatible tools
+Works with keystores from:
+- `keytool` (Java's CLI tool)
+- `java.security.KeyStore` API
+- Any JKS-compatible tool
 
 ## License
 

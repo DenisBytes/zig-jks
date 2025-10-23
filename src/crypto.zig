@@ -1,16 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
-const common = @import("common.zig");
-const types = @import("types.zig");
-
-const Error = types.Error;
 
 const salt_len = 20;
 
-// OID for Sun's proprietary key protection algorithm: 1.3.6.1.4.1.42.2.17.1.1
 const supported_oid = [_]u8{ 0x2B, 0x06, 0x01, 0x04, 0x01, 0x2A, 0x02, 0x11, 0x01, 0x01 };
-
-/// Minimal ASN.1 encoder for keyInfo structure
 const Asn1Encoder = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
@@ -65,7 +58,7 @@ const Asn1Encoder = struct {
     }
 };
 
-/// Minimal ASN.1 decoder for keyInfo structure
+// Minimal ASN.1 decoder for parsing encrypted key data
 const Asn1Decoder = struct {
     data: []const u8,
     pos: usize,
@@ -135,7 +128,7 @@ const Asn1Decoder = struct {
     }
 };
 
-/// Encrypt a private key using JKS proprietary algorithm
+// Encrypt private key with Sun's proprietary algorithm
 pub fn encrypt(
     allocator: std.mem.Allocator,
     rand: std.Random,
@@ -145,10 +138,9 @@ pub fn encrypt(
     var hash = std.crypto.hash.Sha1.init(.{});
     const hash_size = std.crypto.hash.Sha1.digest_length;
 
-    // Convert password
-    const password_bytes = try common.passwordBytes(allocator, password);
+    const password_bytes = try passwordBytes(allocator, password);
     defer {
-        common.zeroing(password_bytes);
+        zeroing(password_bytes);
         allocator.free(password_bytes);
     }
 
@@ -158,11 +150,9 @@ pub fn encrypt(
         num_rounds += 1;
     }
 
-    // Generate random salt
     var salt: [salt_len]u8 = undefined;
     rand.bytes(&salt);
 
-    // Generate XOR key
     const xor_key = try allocator.alloc(u8, plain_key_len);
     defer allocator.free(xor_key);
 
@@ -181,7 +171,6 @@ pub fn encrypt(
         xor_offset += copy_len;
     }
 
-    // XOR plain key with xor_key
     const tmp_key = try allocator.alloc(u8, plain_key_len);
     defer allocator.free(tmp_key);
 
@@ -189,13 +178,11 @@ pub fn encrypt(
         tmp_key[i] = byte ^ xor_key[i];
     }
 
-    // Compute final digest
     hash = std.crypto.hash.Sha1.init(.{});
     hash.update(password_bytes);
     hash.update(plain_key);
     hash.final(&digest);
 
-    // Assemble encrypted key: salt || tmp_key || digest
     const encrypted_key = try allocator.alloc(u8, salt_len + plain_key_len + hash_size);
     defer allocator.free(encrypted_key);
 
@@ -203,11 +190,9 @@ pub fn encrypt(
     @memcpy(encrypted_key[salt_len .. salt_len + plain_key_len], tmp_key);
     @memcpy(encrypted_key[salt_len + plain_key_len ..], &digest);
 
-    // Encode with ASN.1
     var encoder = Asn1Encoder.init(allocator);
     defer encoder.deinit();
 
-    // Encode AlgorithmIdentifier: SEQUENCE { OID, NULL }
     var algo_buf = std.ArrayList(u8).init(allocator);
     defer algo_buf.deinit();
 
@@ -220,7 +205,6 @@ pub fn encrypt(
     try encoder.encodeSequence(algo_enc.buffer.items);
     try encoder.encodeOctetString(encrypted_key);
 
-    // Wrap in outer SEQUENCE
     const inner = try allocator.dupe(u8, encoder.buffer.items);
     defer allocator.free(inner);
 
@@ -230,48 +214,44 @@ pub fn encrypt(
     return try encoder.buffer.toOwnedSlice();
 }
 
-/// Decrypt a private key using JKS proprietary algorithm
+// Decrypt private key encrypted with Sun's algorithm
 pub fn decrypt(
     allocator: std.mem.Allocator,
     data: []const u8,
     password: []const u8,
 ) ![]u8 {
-    // Decode ASN.1
     var decoder = Asn1Decoder.init(data);
 
     const outer_seq = try decoder.readSequence(); // Outer SEQUENCE
     var inner_decoder = Asn1Decoder.init(outer_seq);
 
-    // Read AlgorithmIdentifier
     const algo_seq = try inner_decoder.readSequence();
     var algo_decoder = Asn1Decoder.init(algo_seq);
 
     const oid = try algo_decoder.readOid();
     if (!std.mem.eql(u8, oid, &supported_oid)) {
-        return Error.UnsupportedAlgorithm;
+        return error.UnsupportedAlgorithm;
     }
 
     try algo_decoder.skipNull();
 
-    // Read encrypted private key
     const encrypted_key = try inner_decoder.readOctetString();
 
     if (inner_decoder.pos != inner_decoder.data.len) {
-        return Error.InvalidKeyData;
+        return error.InvalidKeyData;
     }
 
-    // Decrypt
     var hash = std.crypto.hash.Sha1.init(.{});
     const hash_size = std.crypto.hash.Sha1.digest_length;
 
-    const password_bytes = try common.passwordBytes(allocator, password);
+    const password_bytes = try passwordBytes(allocator, password);
     defer {
-        common.zeroing(password_bytes);
+        zeroing(password_bytes);
         allocator.free(password_bytes);
     }
 
     if (encrypted_key.len < salt_len + hash_size) {
-        return Error.InvalidKeyData;
+        return error.InvalidKeyData;
     }
 
     var salt: [salt_len]u8 = undefined;
@@ -285,7 +265,6 @@ pub fn decrypt(
 
     const encrypted_part = encrypted_key[salt_len .. salt_len + encrypted_key_len];
 
-    // Generate XOR key
     const xor_key = try allocator.alloc(u8, encrypted_key_len);
     defer allocator.free(xor_key);
 
@@ -304,7 +283,6 @@ pub fn decrypt(
         xor_offset += copy_len;
     }
 
-    // XOR to get plain key
     const plain_key = try allocator.alloc(u8, encrypted_key_len);
     errdefer allocator.free(plain_key);
 
@@ -312,7 +290,6 @@ pub fn decrypt(
         plain_key[i] = byte ^ xor_key[i];
     }
 
-    // Verify digest
     hash = std.crypto.hash.Sha1.init(.{});
     hash.update(password_bytes);
     hash.update(plain_key);
@@ -320,13 +297,28 @@ pub fn decrypt(
 
     const expected_digest = encrypted_key[salt_len + encrypted_key_len ..];
     if (!std.mem.eql(u8, &digest, expected_digest)) {
-        return Error.InvalidDigest;
+        return error.InvalidDigest;
     }
 
     return plain_key;
 }
 
-// Tests
+fn passwordBytes(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
+    const result = try allocator.alloc(u8, password.len * 2);
+    errdefer allocator.free(result);
+
+    for (password, 0..) |b, i| {
+        result[i * 2] = 0;
+        result[i * 2 + 1] = b;
+    }
+
+    return result;
+}
+
+fn zeroing(buf: []u8) void {
+    @memset(buf, 0);
+}
+
 
 test "encrypt and decrypt round trip" {
     var prng = std.Random.DefaultPrng.init(0);
@@ -355,7 +347,7 @@ test "decrypt with wrong password fails" {
     defer testing.allocator.free(encrypted);
 
     const result = decrypt(testing.allocator, encrypted, "wrongpassword");
-    try testing.expectError(Error.InvalidDigest, result);
+    try testing.expectError(error.InvalidDigest, result);
 }
 
 test "encrypt with different key sizes" {
@@ -364,7 +356,6 @@ test "encrypt with different key sizes" {
 
     const password = "password123";
 
-    // Test various key sizes
     const sizes = [_]usize{ 16, 32, 64, 100, 256 };
 
     for (sizes) |size| {

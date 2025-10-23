@@ -1,8 +1,7 @@
-/// Example: Inspecting KeyStore contents
-/// This example demonstrates how to load and inspect a keystore
+// Load a keystore and inspect what's inside
 
 const std = @import("std");
-const jks = @import("zig_jks");
+const jks = @import("jks");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -17,10 +16,10 @@ pub fn main() !void {
     };
     defer file.close();
 
-    std.debug.print("Inspecting KeyStore...\n\n", .{});
+    std.debug.print("Inspecting JKS keystore...\n\n", .{});
 
     // Load the keystore
-    var keystore = jks.KeyStore.init(allocator);
+    var keystore = jks.Jks.init(allocator);
     defer keystore.deinit();
 
     const password = "mixedpass";
@@ -32,7 +31,7 @@ pub fn main() !void {
     const alias_list = try keystore.aliases();
     defer allocator.free(alias_list);
 
-    std.debug.print("KeyStore contains {} entries:\n\n", .{alias_list.len});
+    std.debug.print("JKS keystore contains {} entries:\n\n", .{alias_list.len});
 
     // Inspect each entry
     for (alias_list, 1..) |alias, i| {
