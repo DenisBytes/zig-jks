@@ -49,7 +49,7 @@ exe.root_module.addImport("jks", jks.module("jks"));
 
 ```zig
 const std = @import("std");
-const jks = @import("zig_jks");
+const jks = @import("jks");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
